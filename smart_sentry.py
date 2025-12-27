@@ -65,6 +65,10 @@ LOG_FILE = os.path.join(LOG_DIR, "detection_log.csv")
 MOTION_THRESHOLD = 1000  # How many pixels must change to trigger AI? (Tune this!)
 CONFIDENCE_THRESHOLD = 0.7 # AI must be this sure it's an object
 COOLDOWN_SECONDS = 2.0    # Don't save same object more than once every 2 seconds
+BACKGROUND_ALPHA = 0.1  # Changed from 0.5 to 0.1 for better stability
+
+# Frame Skipping to save CPU (Process 1 out of every N frames)
+FRAME_PROCESS_INTERVAL = 3 
 
 # Objects we care about (Standard COCO classes)
 TARGET_CLASSES = {1: 'person', 17: 'cat', 18: 'dog', 21: 'bear'}
@@ -73,7 +77,7 @@ TARGET_CLASSES = {1: 'person', 17: 'cat', 18: 'dog', 21: 'bear'}
 print(f"Connecting to {CAM_URL}...")
 net = jetson.inference.detectNet("ssd-mobilenet-v2", threshold=CONFIDENCE_THRESHOLD)
 cap = cv2.VideoCapture(CAM_URL)
-display = jetson.utils.videoOutput("display://0") # Remove this line if running headless
+display = jetson.utils.videoOutput("display://0") 
 
 # Verify Output Directory
 if not os.path.exists(LOG_DIR):
@@ -87,14 +91,12 @@ if not os.path.exists(LOG_FILE):
 # Motion Detection State
 avg_frame = None
 last_save_time = 0
+frame_counter = 0
 
 print("Sentry System Armed. Press Ctrl+C to stop.")
 
 while display.IsStreaming():
-    # we don't need to burn up the processor
-    time.sleep(0.1)
-
-    # 1. Capture Frame (OpenCV)
+    # 1. Capture EVERY frame to keep buffer empty (Fixes Lag)
     ret, frame = cap.read()
     if not ret:
         print("Video stream lost. Retrying...")
@@ -102,7 +104,12 @@ while display.IsStreaming():
         cap.open(CAM_URL)
         continue
 
-    # 2. Motion Detection (Lightweight CPU)
+    # 2. CPU Saver: Only process logic every Nth frame
+    frame_counter += 1
+    if frame_counter % FRAME_PROCESS_INTERVAL != 0:
+        continue
+
+    # 3. Motion Detection (Lightweight CPU)
     # Convert to grayscale and blur to remove noise
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (21, 21), 0)
@@ -112,8 +119,8 @@ while display.IsStreaming():
         avg_frame = gray.astype("float")
         continue
 
-    # Accumulate weighted average (Background learns slowly)
-    cv2.accumulateWeighted(gray, avg_frame, 0.5)
+    # Update background (slower alpha prevents ghosts)
+    cv2.accumulateWeighted(gray, avg_frame, BACKGROUND_ALPHA)
     
     # Calculate difference
     frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(avg_frame))
@@ -124,32 +131,30 @@ while display.IsStreaming():
     #if change_count > 10:
     #    print( change_count )
 
-    # 3. Decision Gate
     motion_detected = change_count > MOTION_THRESHOLD
     
-    # Visual Debug: Draw "Motion" text on screen if moving
     if motion_detected:
-        #cv2.putText(frame, "MOTION DETECTED", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        
         # 4. AI Detection (Only runs if motion detected)
         # Convert BGR to RGBA for Jetson
         frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
         cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
-        
         detections = net.Detect(cuda_img)
         
         current_time = time.time()
         
-        # Check if we found something interesting
-        found_target = False
-        description = ""
+        # We need to capture the SPECIFIC object that triggered the alert
+        # so we don't accidentally log the confidence of a chair or potted plant.
+        primary_target = None 
         
         for d in detections:
             if d.ClassID in TARGET_CLASSES:
-                found_target = True
+                # We found a target!
                 class_name = TARGET_CLASSES[d.ClassID]
+                conf_percent = round(d.Confidence * 100)
                 description = f"{class_name}"
-                
+                # If this is the first target found this frame, save it as the "Primary" for logging
+                if primary_target is None:
+                    primary_target = (class_name, conf_percent)
                 # Draw box on the OpenCV frame (for saving)
                 # Note: d.Left, d.Top, etc are floats, cast to int
                 col_conf = round(255 * d.Confidence)
@@ -167,16 +172,16 @@ while display.IsStreaming():
                     cv2.LINE_AA
                     )
 
-        # 5. Save Evidence (With Cooldown)
-        if found_target and (current_time - last_save_time > COOLDOWN_SECONDS):
+        # 5. Save Evidence (Using the Primary Target data)
+        if primary_target and (current_time - last_save_time > COOLDOWN_SECONDS):
+            t_class, t_conf = primary_target # Unpack the data
+            
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"alert_{timestamp}.jpg"
             save_path = os.path.join(LOG_DIR, filename)
             
-            # Save the image
             cv2.imwrite(save_path, frame)
             
-            # Log to CSV
             with open(LOG_FILE, "a") as f:
                 f.write(f"{datetime.datetime.now()}, {description}, {round(d.Confidence*100)}%, {save_path}\n")
             
