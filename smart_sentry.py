@@ -2,6 +2,7 @@ import jetson.inference
 import jetson.utils
 import cv2
 import numpy as np
+import requests
 import time
 import datetime
 import os
@@ -58,13 +59,16 @@ python3 smart_sentry.py
 
 # --- CONFIGURATION ---
 CAM_URL = "http://192.168.0.112/img/video.mjpeg"
+TASMOTA_URL = "http://192.168.0.178/cm?cmnd=" #Power%20Blink
+TIMEOUT = 0.00001 #effectively don't wait for a reply. It gets it or it doesn't Meh.
 LOG_DIR = "/mnt/sdcard/captures"
 LOG_FILE = os.path.join(LOG_DIR, "detection_log.csv")
 
 # Sensitivity Settings
 MOTION_THRESHOLD = 1000  # How many pixels must change to trigger AI? (Tune this!)
 CONFIDENCE_THRESHOLD = 0.7 # AI must be this sure it's an object
-COOLDOWN_SECONDS = 2.0    # Don't save same object more than once every 2 seconds
+COOLDOWN_SECONDS = 2.0    # Don't save same object more than
+DOORBELL_SECONDS = 5.0    # Don't ring the bell constantly
 BACKGROUND_ALPHA = 0.1  # Changed from 0.5 to 0.1 for better stability
 
 # Frame Skipping to save CPU (Process 1 out of every N frames)
@@ -72,6 +76,28 @@ FRAME_PROCESS_INTERVAL = 3
 
 # Objects we care about (Standard COCO classes)
 TARGET_CLASSES = {1: 'person', 17: 'cat', 18: 'dog', 21: 'bear'}
+
+def tasmota_cmd(cmd):
+    """
+    send a command to the tasmota device
+    """
+    # Tasmota uses a simple HTTP GET protocol
+    # Command format: http://<IP>/cm?cmnd=Power%20<State>
+    
+    try:
+        #print(f"sending {cmd]")
+        response = requests.get(f"{TASMOTA_URL}{cmd}", timeout=(None, 0.00001))
+        # Tasmota returns JSON, e.g., {"POWER": "ON"}
+        #if response.status_code == 200:
+            #data = response.json()
+            #print(f"Success! Device replied: {data}")
+        #else:
+            #print(f"Error: HTTP {response.status_code}")
+    except requests.exceptions.ReadTimeout:
+        pass
+    except requests.exceptions.ConnectionError:
+        print("tasmota failed")
+
 
 # --- SETUP ---
 print(f"Connecting to {CAM_URL}...")
@@ -91,7 +117,10 @@ if not os.path.exists(LOG_FILE):
 # Motion Detection State
 avg_frame = None
 last_save_time = 0
+last_bell_time = 0
 frame_counter = 0
+
+tasmota_cmd("Power1%20Blink")
 
 print("Sentry System Armed. Press Ctrl+C to stop.")
 
@@ -139,12 +168,12 @@ while display.IsStreaming():
         frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
         cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
         detections = net.Detect(cuda_img)
-        
+        #tasmota_cmd("Power2%20Blink")
         current_time = time.time()
         
-        # We need to capture the SPECIFIC object that triggered the alert
-        # so we don't accidentally log the confidence of a chair or potted plant.
+        # Capture the most certain object that triggered the alert
         primary_target = None 
+        saw_person = None
         
         for d in detections:
             if d.ClassID in TARGET_CLASSES:
@@ -155,6 +184,7 @@ while display.IsStreaming():
                 # If this is the first target found this frame, save it as the "Primary" for logging
                 if primary_target is None:
                     primary_target = (class_name, conf_percent)
+                if (d.ClassID == 1): saw_someone = True
                 # Draw box on the OpenCV frame (for saving)
                 # Note: d.Left, d.Top, etc are floats, cast to int
                 col_conf = round(255 * d.Confidence)
@@ -184,9 +214,15 @@ while display.IsStreaming():
             
             with open(LOG_FILE, "a") as f:
                 f.write(f"{datetime.datetime.now()}, {description}, {round(d.Confidence*100)}%, {save_path}\n")
-            
+
             print(f"Alert: {filename} {description} {round(d.Confidence*100)}% ")
             last_save_time = current_time
+
+        if (saw_someone and current_time - last_bell_time > DOORBELL_SECONDS):
+            tasmota_cmd("Power1%20Blink") #ring the bell
+            last_bell_time = current_time
+
+        #end of detection
 
     # 6. Display Live Feed (Optional)
     # Convert back to CUDA for display output (since display.Render expects CUDA)
