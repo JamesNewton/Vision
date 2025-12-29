@@ -12,6 +12,7 @@ import threading
 TASMOTA_URL = "http://192.168.0.178/cm?cmnd=" 
 LOG_DIR = "/mnt/sdcard/captures"
 LOG_FILE = os.path.join(LOG_DIR, "detection_log.csv")
+ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
 
 # SHARED SETTINGS
 CONFIDENCE_THRESHOLD = 0.7 
@@ -27,7 +28,7 @@ CAM1_CONFIG = {
     "name": "Linksys",
     "type": "http",
     "url": "http://192.168.0.112/img/snapshot.cgi",
-    "motion_threshold": 1000,
+    "motion_threshold": 800,
     "alpha": 0.2
 }
 
@@ -36,8 +37,8 @@ CAM1_CONFIG = {
 CAM2_CONFIG = {
     "name": "Tapo",
     "type": "rtsp",
-    "url": "rtsp://192.168.0.102:554/stream2",
-    "motion_threshold": 500, # Lower threshold for lower resolution stream
+    "url": "rtsp://jamesnewton%40geocities.com:eudjehh48d8x7ueh4by@192.168.0.102:554/stream2",
+    "motion_threshold": 1200, 
     "alpha": 0.4
 }
 
@@ -123,6 +124,8 @@ if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w") as f:
         f.write("Timestamp,Camera,Class,Confidence,Image_Path\n")
+with open(ALERT_FILE, "w") as f:
+    f.write(f"Starting\n")
 
 last_save_time = 0
 last_bell_time = 0
@@ -138,6 +141,7 @@ try:
         time.sleep(POLL_INTERVAL)
         
         display_images = []
+        print(".                    ", end="\r", flush=True) #restart the line.
 
         for config, cam_obj in active_cams:
             
@@ -148,10 +152,11 @@ try:
             if frame is None:
                 if cam_obj.last_valid_frame is not None:
                     frame = cam_obj.last_valid_frame
+                    cv2.putText(frame, "OLD", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
                 else:
                     # Create 640x360 black placeholder
                     frame = np.zeros((360, 640, 3), dtype=np.uint8)
-                    cv2.putText(frame, "OFFLINE", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                    cv2.putText(frame, "OFFLINE", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
             
             # Save for the "Stitcher" at the end
             display_images.append(frame)
@@ -173,9 +178,14 @@ try:
             cv2.accumulateWeighted(gray, cam_obj.avg_frame, config['alpha'])
             frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(cam_obj.avg_frame))
             thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+            non_zero_thresh = np.count_nonzero(thresh)
+            print(non_zero_thresh, end=" ")
             
-            if np.count_nonzero(thresh) > config['motion_threshold']:
-                
+            if non_zero_thresh > config['motion_threshold']:
+                print("M", end=" ")
+                cv2.putText(proc_frame, "M", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                display_images[-1] = proc_frame #replace display
+
                 # --- AI DETECTION ---
                 frame_rgba = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGBA)
                 cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
@@ -216,6 +226,9 @@ try:
                     with open(LOG_FILE, "a") as f:
                         f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {save_path}\n")
 
+                    with open(ALERT_FILE, "w") as f:
+                        f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {save_path}\n")
+
                     print(f"Alert [{config['name']}]: {t_class} {t_conf}%")
                     
                     if (current_time - last_bell_time > DOORBELL_SECONDS):
@@ -226,6 +239,10 @@ try:
                         last_bell_time = current_time
                     
                     last_save_time = current_time
+                    #end recog
+                #end motion detected
+            print(", ", end="")
+            #end camera
 
         # --- DISPLAY COMPOSITOR ---
         if display.IsStreaming() and len(display_images) >= 2:
