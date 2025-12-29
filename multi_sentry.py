@@ -37,7 +37,7 @@ CAM1_CONFIG = {
 CAM2_CONFIG = {
     "name": "Tapo",
     "type": "rtsp",
-    "url": "rtsp://jamesnewton%40geocities.com:eudjehh48d8x7ueh4by@192.168.0.102:554/stream2",
+    "url": "rtsp://192.168.0.102:554/stream2",
     "motion_threshold": 1200, 
     "alpha": 0.4
 }
