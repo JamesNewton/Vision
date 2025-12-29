@@ -51,13 +51,16 @@ class HttpCamera:
         self.url = config['url']
         self.name = config['name']
         self.avg_frame = None
+        self.last_valid_frame = None # For display persistence
 
     def read(self):
         try:
             r = requests.get(self.url, timeout=0.5)
             if r.status_code == 200:
                 arr = np.frombuffer(r.content, np.uint8)
-                return cv2.imdecode(arr, -1)
+                frame = cv2.imdecode(arr, -1)
+                self.last_valid_frame = frame
+                return frame
         except:
             pass
         return None
@@ -72,6 +75,7 @@ class RtspCamera:
         self.name = config['name']
         self.avg_frame = None
         self.frame = None
+        self.last_valid_frame = None
         self.stopped = False
         self.stream = cv2.VideoCapture(self.url)
         # Start background drainer immediately
@@ -82,8 +86,9 @@ class RtspCamera:
             grabbed, frame = self.stream.read()
             if grabbed:
                 self.frame = frame
+                self.last_valid_frame = frame
             else:
-                # Auto-reconnect logic could go here, but keeping it simple
+                # TODO Auto-reconnect
                 time.sleep(1) 
 
     def read(self):
@@ -95,7 +100,8 @@ class RtspCamera:
 
 def tasmota_cmd(cmd):
     try:
-        requests.get(f"{TASMOTA_URL}{cmd}", timeout=(0.05, 0.05))
+        # TIMEOUT FIX: Wait for connection (None), but don't wait for reply (0.05)
+        requests.get(f"{TASMOTA_URL}{cmd}", timeout=(None, 0.05))
     except:
         pass
 
@@ -126,16 +132,38 @@ print(f"Sentry Armed with {len(active_cams)} cameras. Press Ctrl+C to stop.")
 
 try:
     while True:
+        # If we are rendering video, we want to update faster than the poll interval
+        # so the persistent RTSP feed looks smooth, even if we only run AI logic 5 times/sec.
+        # But to keep it simple and low power, we will stick to the poll interval for now.
         time.sleep(POLL_INTERVAL)
         
-        # Loop through all cameras
+        display_images = []
+
         for config, cam_obj in active_cams:
             
             frame = cam_obj.read()
-            if frame is None: continue
+            
+            # --- DISPLAY PREP ---
+            # If camera is offline, use the last known frame or a black box
+            if frame is None:
+                if cam_obj.last_valid_frame is not None:
+                    frame = cam_obj.last_valid_frame
+                else:
+                    # Create 640x360 black placeholder
+                    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+                    cv2.putText(frame, "OFFLINE", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+            
+            # Save for the "Stitcher" at the end
+            display_images.append(frame)
 
-            # --- MOTION DETECTION ---
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # --- MOTION LOGIC (Skip if frame is the dummy black box) ---
+            if cam_obj.last_valid_frame is None: continue 
+            
+            # (Re-read fresh frame for processing logic to ensure we don't process stale data)
+            proc_frame = cam_obj.read()
+            if proc_frame is None: continue
+
+            gray = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2GRAY)
             gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
             if cam_obj.avg_frame is None:
@@ -149,7 +177,7 @@ try:
             if np.count_nonzero(thresh) > config['motion_threshold']:
                 
                 # --- AI DETECTION ---
-                frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+                frame_rgba = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGBA)
                 cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
                 detections = net.Detect(cuda_img)
                 
@@ -164,12 +192,16 @@ try:
                         if primary_target is None:
                             primary_target = (class_name, conf_percent)
                         
-                        # Priority Override (Person > Dog)
                         if class_name == 'person' and primary_target[0] != 'person':
                             primary_target = (class_name, conf_percent)
 
-                        # Draw (Optional - heavy on CPU if VNC is off, maybe skip?)
-                        # cv2.rectangle(...) 
+                        # Draw boxes on the OpenCV frame for the Display
+                        col_conf = round(255 * d.Confidence)
+                        cv2.rectangle(proc_frame, (int(d.Left), int(d.Top)), (int(d.Right), int(d.Bottom)), (0, col_conf, 0), 2)
+                        
+                        # Update the display image list with this annotated frame
+                        # (We replace the raw frame we added earlier)
+                        display_images[-1] = proc_frame
 
                 # --- ACTIONS ---
                 if primary_target and (current_time - last_save_time > COOLDOWN_SECONDS):
@@ -179,7 +211,7 @@ try:
                     filename = f"{config['name']}_{timestamp}.jpg"
                     save_path = os.path.join(LOG_DIR, filename)
                     
-                    cv2.imwrite(save_path, frame)
+                    cv2.imwrite(save_path, proc_frame)
                     
                     with open(LOG_FILE, "a") as f:
                         f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {save_path}\n")
@@ -194,6 +226,33 @@ try:
                         last_bell_time = current_time
                     
                     last_save_time = current_time
+
+        # --- DISPLAY COMPOSITOR ---
+        if display.IsStreaming() and len(display_images) >= 2:
+            # 1. Resize all to a standard height (e.g. 360p) so they stack nicely
+            target_h = 360
+            resized_imgs = []
+            
+            for img in display_images:
+                h, w = img.shape[:2]
+                scale = target_h / h
+                new_w = int(w * scale)
+                resized = cv2.resize(img, (new_w, target_h))
+                
+                # Add a label so we know which cam is which
+                # (We can't easily get the name here without complicating the list, 
+                # but we know 0 is Linksys, 1 is Tapo)
+                resized_imgs.append(resized)
+
+            # 2. Stitch them side-by-side
+            # hstack requires same height, which we just ensured
+            combined_img = np.hstack(resized_imgs)
+            
+            # 3. Render
+            frame_rgba = cv2.cvtColor(combined_img, cv2.COLOR_BGR2RGBA)
+            cuda_display = jetson.utils.cudaFromNumpy(frame_rgba)
+            display.Render(cuda_display)
+            display.SetStatus(f"Sentry Mode | Cameras: {len(active_cams)}")
 
 except KeyboardInterrupt:
     for _, c in active_cams:
