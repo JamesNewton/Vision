@@ -173,7 +173,7 @@ while display.IsStreaming():
         
         # Capture the most certain object that triggered the alert
         primary_target = None 
-        saw_person = None
+        saw_person = False
         
         for d in detections:
             if d.ClassID in TARGET_CLASSES:
@@ -184,7 +184,7 @@ while display.IsStreaming():
                 # If this is the first target found this frame, save it as the "Primary" for logging
                 if primary_target is None:
                     primary_target = (class_name, conf_percent)
-                if (d.ClassID == 1): saw_someone = True
+                if (d.ClassID == 1): saw_person = True
                 # Draw box on the OpenCV frame (for saving)
                 # Note: d.Left, d.Top, etc are floats, cast to int
                 col_conf = round(255 * d.Confidence)
@@ -218,7 +218,7 @@ while display.IsStreaming():
             print(f"Alert: {filename} {description} {round(d.Confidence*100)}% ")
             last_save_time = current_time
 
-        if (saw_someone and current_time - last_bell_time > DOORBELL_SECONDS):
+        if (saw_person and current_time - last_bell_time > DOORBELL_SECONDS):
             tasmota_cmd("Power1%20Blink") #ring the bell
             last_bell_time = current_time
 
