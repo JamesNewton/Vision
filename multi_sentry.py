@@ -39,7 +39,7 @@ CAM2_CONFIG = {
     "type": "rtsp",
     "url": "rtsp://192.168.0.102:554/stream2",
     "motion_threshold": 1200, 
-    "alpha": 0.4
+    "alpha": 0.3
 }
 
 CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
@@ -227,7 +227,7 @@ try:
                         f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {save_path}\n")
 
                     with open(ALERT_FILE, "w") as f:
-                        f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {save_path}\n")
+                        f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {filename}\n")
 
                     print(f"Alert [{config['name']}]: {t_class} {t_conf}%")
                     
