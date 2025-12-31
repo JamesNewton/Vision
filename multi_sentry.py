@@ -3,6 +3,11 @@ import jetson.utils
 import cv2
 import numpy as np
 import requests
+'''
+requires:
+pip install requests
+after docker startup, or build a new image from the original dustynv
+'''
 import time
 import datetime
 import os
