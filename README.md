@@ -39,6 +39,7 @@ tar -zxvf SSD-Mobilenet-v2.tar.gz
 ```
 Run with:
 ```
+xhost + #permission to show a local camera preview
 sudo docker run --runtime nvidia -it --rm \
     --network host \
     -e DISPLAY=:0 \
@@ -62,7 +63,9 @@ The focus of the code is to run efficiently with low energy use by NOT just runn
 ## Docker Image
 A new docker image can be produced by building a Docker file. For example:
 ```bash
-/mnt/sdcard
+cd /mnt/sdcard
+mkdir docker-build
+cd docker-build
 nano Docker
 ```
 and the file could contain:
@@ -71,8 +74,9 @@ and the file could contain:
 FROM dustynv/jetson-inference:r32.4.3
 
 # Install requests
-RUN pip3 install --upgrade pip && \
-    pip3 install requests
+# Use 'python3 -m pip' to silence the wrapper warnings
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install requests
 
 # Set the LD_PRELOAD variable permanently
 ENV LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1
@@ -88,6 +92,7 @@ Note the "." at the end. This takes a LONG time.
 
 Run (notice you don't need to type the export command anymore)
 ```
+xhost + #permission to show a local camera preview
 sudo docker run --runtime nvidia -it --rm \
     --network host \
     -e DISPLAY=:0 \
@@ -96,9 +101,15 @@ sudo docker run --runtime nvidia -it --rm \
     boxer-vision-image
 
 ```
+And then run whichever Python script you like.
 
 ## Locale
-By default, the dates, times, numbers, are all shown in an asian font. To return this to english numbers:
+By default, the dates, times, numbers, are all shown in an asian font. To return this to english numbers, it should have been possible to do a 
+```bash
+sudo update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+```
+You must reboot to see the change. But that didn't seem to work for me. Type `locale` to check. I ended up doing:
+
 ```bash
 sudo locale-gen en_US.UTF-8
 sudo update-locale LANG=en_US.UTF-8
@@ -106,8 +117,3 @@ echo "LANG=en_US.UTF-8" | sudo tee /etc/default/locale
 echo "LC_ALL=en_US.UTF-8" | sudo tee -a /etc/default/locale
 ```
 You must reboot to see the change.
-It should have been possible to do a 
-```bash
-sudo update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-```
-but that didn't seem to work for me.
