@@ -96,3 +96,18 @@ sudo docker run --runtime nvidia -it --rm \
     boxer-vision-image
 
 ```
+
+## Locale
+By default, the dates, times, numbers, are all shown in an asian font. To return this to english numbers:
+```bash
+sudo locale-gen en_US.UTF-8
+sudo update-locale LANG=en_US.UTF-8
+echo "LANG=en_US.UTF-8" | sudo tee /etc/default/locale
+echo "LC_ALL=en_US.UTF-8" | sudo tee -a /etc/default/locale
+```
+You must reboot to see the change.
+It should have been possible to do a 
+```bash
+sudo update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+```
+but that didn't seem to work for me.
