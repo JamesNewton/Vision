@@ -48,6 +48,7 @@ sudo docker run --runtime nvidia -it --rm \
 
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1
 cd /mnt/sdcard
+pip install requests # required for tasmota support
 python3 <whicever>.py
 ```
 
@@ -58,3 +59,40 @@ The focus of the code is to run efficiently with low energy use by NOT just runn
 - `slow_sentry.py` switches to single image captures at a much slower rate, which still works just fine.
 - `multi-sentry.py` supports multiple cameras, including more modern streaming only units like the topo, white still limiting processing. It also supports a tasmota device to ring a doorbell or flash a light when a person is seen. It also writes out a file to trigger a notification via a web server script.
 
+## Docker Image
+A new docker image can be produced by building a Docker file. For example:
+```bash
+/mnt/sdcard
+nano Docker
+```
+and the file could contain:
+```
+# start with the orignal downloaded image:
+FROM dustynv/jetson-inference:r32.4.3
+
+# Install requests
+RUN pip3 install --upgrade pip && \
+    pip3 install requests
+
+# Set the LD_PRELOAD variable permanently
+ENV LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1
+
+# Set working directory
+WORKDIR /mnt/sdcard
+```
+Save that (Ctrl-X, Y, Enter) and then build the new image:
+```bash
+sudo docker build -t boxer-vision-image .
+```
+Note the "." at the end. This takes a LONG time. 
+
+Run (notice you don't need to type the export command anymore)
+```
+sudo docker run --runtime nvidia -it --rm \
+    --network host \
+    -e DISPLAY=:0 \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    -v /mnt/sdcard:/mnt/sdcard \
+    boxer-vision-image
+
+```
