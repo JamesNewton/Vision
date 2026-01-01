@@ -75,34 +75,93 @@ class HttpCamera:
         pass # Nothing to stop
 
 class RtspCamera:
-    """Handles cameras that require persistent RTSP connection (Tapo)"""
+    """
+    Handles cameras that require persistent RTSP connection (Tapo).
+    Includes 'Frozen Frame' detection to auto-reconnect if the stream hangs.
+    """
     def __init__(self, config):
         self.url = config['url']
         self.name = config['name']
         self.avg_frame = None
         self.frame = None
         self.last_valid_frame = None
+        
+        # Stream Management
         self.stopped = False
-        self.stream = cv2.VideoCapture(self.url)
+        self.stream = None
+        self.lock = threading.Lock() # Prevent reading while resetting
+        
         # Start background drainer immediately
         threading.Thread(target=self.update, daemon=True).start()
 
+    def start_stream(self):
+        """Internal: Safely opens the capture"""
+        print(f"[{self.name}] Connecting RTSP...")
+        if self.stream:
+            self.stream.release()
+        self.stream = cv2.VideoCapture(self.url)
+        # Optional: reduce buffer size to ensure freshness
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     def update(self):
+        self.start_stream()
+        
+        # Freeze Detection Variables
+        last_raw_frame = None
+        stale_count = 0
+        STALE_LIMIT = 100 # Approx 5-10 seconds depending on FPS
+
         while not self.stopped:
+            if self.stream is None or not self.stream.isOpened():
+                time.sleep(1)
+                continue
+
             grabbed, frame = self.stream.read()
-            if grabbed:
-                self.frame = frame
-                self.last_valid_frame = frame
+            
+            if grabbed and frame is not None:
+                is_frozen = False
+                if last_raw_frame is not None:
+                    # Real cams will NOT be bit-exact identical
+                    # TODO: check a small slice to save CPU
+                    diff = cv2.absdiff(frame, last_raw_frame)
+                    if np.count_nonzero(diff) == 0:
+                        stale_count += 1
+                        is_frozen = True
+                    else:
+                        stale_count = 0 # Reset if we see changes
+                
+                last_raw_frame = frame.copy() # Save for next cycle
+
+                if stale_count > STALE_LIMIT:
+                    print(f"[{self.name}] FROZEN DETECTED! Restarting stream...")
+                    with self.lock:
+                        self.frame = None # Trigger 'OFFLINE' in main loop
+                    self.start_stream()
+                    stale_count = 0
+                    last_raw_frame = None
+                elif not is_frozen:
+                    with self.lock:
+                        self.frame = frame
+                        self.last_valid_frame = frame
+                
+                # Tiny sleep to yield CPU, but don't overflow buffer
+                time.sleep(0.01) 
+
             else:
-                # TODO Auto-reconnect
-                time.sleep(1) 
+                # Standard 'Connection Lost' logic
+                print(f"[{self.name}] Signal lost. Retrying...")
+                with self.lock:
+                    self.frame = None
+                time.sleep(2)
+                self.start_stream()
 
     def read(self):
-        return self.frame
+        with self.lock:
+            return self.frame
 
     def stop(self):
         self.stopped = True
-        self.stream.release()
+        if self.stream: self.stream.release()
 
 def tasmota_cmd(cmd):
     try:
