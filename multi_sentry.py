@@ -16,7 +16,6 @@ import threading
 # --- CONFIGURATION ---
 TASMOTA_URL = "http://192.168.0.178/cm?cmnd=" 
 LOG_DIR = "/mnt/sdcard/captures"
-LOG_FILE = os.path.join(LOG_DIR, "detection_log.csv")
 ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
 
 # SHARED SETTINGS
@@ -185,9 +184,6 @@ for c in CAMERAS:
         active_cams.append((c, RtspCamera(c)))
 
 if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
-if not os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w") as f:
-        f.write("Timestamp,Camera,Class,Confidence,Image_Path\n")
 with open(ALERT_FILE, "w") as f:
     f.write(f"Starting\n")
 
@@ -286,8 +282,13 @@ try:
                     save_path = os.path.join(LOG_DIR, filename)
                     
                     cv2.imwrite(save_path, proc_frame)
-                    
-                    with open(LOG_FILE, "a") as f:
+
+                    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                    log_path = os.path.join(LOG_DIR, f"{date_str}_detection_log.csv")
+                    if not os.path.exists(log_path):
+                        with open(log_path, "w") as f:
+                            f.write("Timestamp,Camera,Class,Confidence,Image_Path\n")
+                    with open(log_path, "a") as f:
                         f.write(f"{datetime.datetime.now()}, {config['name']}, {t_class}, {t_conf}%, {save_path}\n")
 
                     with open(ALERT_FILE, "w") as f:
