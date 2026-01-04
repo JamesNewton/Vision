@@ -33,7 +33,8 @@ CAM1_CONFIG = {
     "type": "http",
     "url": "http://192.168.0.112/img/snapshot.cgi",
     "motion_threshold": 800,
-    "alpha": 0.2
+    "alpha": 0.2,
+    "alarm_class": ['person']
 }
 
 # 2. Tapo C120 (RTSP Stream 2 Mode)
@@ -43,7 +44,8 @@ CAM2_CONFIG = {
     "type": "rtsp",
     "url": "rtsp://192.168.0.102:554/stream2",
     "motion_threshold": 1200, 
-    "alpha": 0.3
+    "alpha": 0.3,
+    "alarm_class": ['cat', 'dog', 'bear']
 }
 
 CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
@@ -120,8 +122,9 @@ class RtspCamera:
             if grabbed and frame is not None:
                 is_frozen = False
                 if last_raw_frame is not None:
-                    # Real cams will NOT be bit-exact identical
-                    # TODO: check a small slice to save CPU
+                    # Quick check: Are they bit-exact identical?
+                    # Real sensors have noise; identical = frozen stream.
+                    # We check a small slice to save CPU, or the whole thing if low res.
                     diff = cv2.absdiff(frame, last_raw_frame)
                     if np.count_nonzero(diff) == 0:
                         stale_count += 1
@@ -134,7 +137,7 @@ class RtspCamera:
                 if stale_count > STALE_LIMIT:
                     print(f"[{self.name}] FROZEN DETECTED! Restarting stream...")
                     with self.lock:
-                        self.frame = None # Trigger 'OFFLINE' in main loop
+                        self.frame = None # Triggers 'OFFLINE' in main loop
                     self.start_stream()
                     stale_count = 0
                     last_raw_frame = None
@@ -297,7 +300,7 @@ try:
                     print(f"Alert [{config['name']}]: {t_class} {t_conf}%")
                     
                     if (current_time - last_bell_time > DOORBELL_SECONDS):
-                        if t_class == 'person':
+                        if t_class in config["alarm_class"]:
                             tasmota_cmd("Power1%20Blink") 
                         else:
                             tasmota_cmd("Power2%20Blink")
