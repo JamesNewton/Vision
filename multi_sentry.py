@@ -34,7 +34,9 @@ CAM1_CONFIG = {
     "url": "http://192.168.0.112/img/snapshot.cgi",
     "motion_threshold": 800,
     "alpha": 0.2,
-    "alarm_class": ['person']
+    "alarm_class": ['person'],
+    "alarm_type": "object", # 'object' = AI, 'motion' = Simple Motion
+    "roi": None # Full frame
 }
 
 # 2. Tapo C120 (RTSP Stream 2 Mode)
@@ -45,12 +47,50 @@ CAM2_CONFIG = {
     "url": "rtsp://192.168.0.102:554/stream2",
     "motion_threshold": 1200, 
     "alpha": 0.3,
-    "alarm_class": ['cat', 'dog', 'bear']
+    "alarm_class": ['cat', 'dog', 'bear'],
+    "alarm_type": "motion", 
+    
+    # Region of Interest (x, y, width, height)
+    # Example: (100, 100, 300, 200) to ignore trees at edges.
+    # Set to None for full frame.
+    "roi": (100, 120, 535, 230)  
 }
 
 CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
 
-# --- CLASSES ---
+# --- HELPER SUBROUTINES ---
+
+def tasmota_cmd(cmd):
+    try:
+        # TIMEOUT FIX: Wait for connection (None), but don't wait for reply (0.05)
+        requests.get(f"{TASMOTA_URL}{cmd}", timeout=(None, 0.05))
+    except:
+        pass
+
+def check_motion_level(frame, avg_frame, alpha):
+    """
+    Subroutine to check an area for motion.
+    Returns: pixel_count, updated_avg_frame
+    """
+    # Convert to grayscale and blur to remove noise
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+    # Initialize background on first frame
+    if avg_frame is None:
+        avg_frame = gray.astype("float")
+        return 0, avg_frame
+
+    # Update background
+    cv2.accumulateWeighted(gray, avg_frame, alpha)
+    
+    # Calculate difference
+    frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(avg_frame))
+    thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+    
+    return np.count_nonzero(thresh), avg_frame
+
+# --- CAMERA CLASSES ---
 
 class HttpCamera:
     """Handles cameras that support single-frame HTTP GET (Linksys)"""
@@ -106,9 +146,8 @@ class RtspCamera:
 
     def update(self):
         self.start_stream()
-        
-        # Freeze Detection Variables
-        last_raw_frame = None
+        # Settings to detect frozen cameras (frames all the same)
+        last_raw_slice = None
         stale_count = 0
         STALE_LIMIT = 100 # Approx 5-10 seconds depending on FPS
 
@@ -120,19 +159,24 @@ class RtspCamera:
             grabbed, frame = self.stream.read()
             
             if grabbed and frame is not None:
+                h, w = frame.shape[:2]
+                # just check a 64x64 patch from the center to save compute
+                c_y, c_x = h // 2, w // 2
+                curr_slice = frame[c_y:c_y+64, c_x:c_x+64]
+                
                 is_frozen = False
-                if last_raw_frame is not None:
+                if last_raw_slice is not None:
                     # Quick check: Are they bit-exact identical?
                     # Real sensors have noise; identical = frozen stream.
-                    # We check a small slice to save CPU, or the whole thing if low res.
-                    diff = cv2.absdiff(frame, last_raw_frame)
+
+                    diff = cv2.absdiff(curr_slice, last_raw_slice)
                     if np.count_nonzero(diff) == 0:
                         stale_count += 1
                         is_frozen = True
                     else:
                         stale_count = 0 # Reset if we see changes
                 
-                last_raw_frame = frame.copy() # Save for next cycle
+                last_raw_slice = curr_slice.copy() # Save for next cycle
 
                 if stale_count > STALE_LIMIT:
                     print(f"[{self.name}] FROZEN DETECTED! Restarting stream...")
@@ -140,7 +184,7 @@ class RtspCamera:
                         self.frame = None # Triggers 'OFFLINE' in main loop
                     self.start_stream()
                     stale_count = 0
-                    last_raw_frame = None
+                    last_raw_slice = None
                 elif not is_frozen:
                     with self.lock:
                         self.frame = frame
@@ -164,13 +208,6 @@ class RtspCamera:
     def stop(self):
         self.stopped = True
         if self.stream: self.stream.release()
-
-def tasmota_cmd(cmd):
-    try:
-        # TIMEOUT FIX: Wait for connection (None), but don't wait for reply (0.05)
-        requests.get(f"{TASMOTA_URL}{cmd}", timeout=(None, 0.05))
-    except:
-        pass
 
 # --- SETUP ---
 print("Initializing AI...")
@@ -231,52 +268,63 @@ try:
             proc_frame = cam_obj.read()
             if proc_frame is None: continue
 
-            gray = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (21, 21), 0)
+            # If ROI is set ONLY look for motion in that box. 
+            # This saves CPU and ignores wind/trees outside the box.
+            motion_input = proc_frame
+            if config.get('roi'):
+                rx, ry, rw, rh = config['roi']
+                # Safety check for image bounds
+                h, w = proc_frame.shape[:2]
+                if rx+rw <= w and ry+rh <= h:
+                    motion_input = proc_frame[ry:ry+rh, rx:rx+rw]
+            # Note: avg_frame will automatically size itself to the ROI
+            non_zero_thresh, cam_obj.avg_frame = check_motion_level(
+                motion_input, cam_obj.avg_frame, config['alpha']
+            )
 
-            if cam_obj.avg_frame is None:
-                cam_obj.avg_frame = gray.astype("float")
-                continue
-
-            cv2.accumulateWeighted(gray, cam_obj.avg_frame, config['alpha'])
-            frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(cam_obj.avg_frame))
-            thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
-            non_zero_thresh = np.count_nonzero(thresh)
             print(non_zero_thresh, end=" ")
+            if config.get('roi'):
+                rx, ry, rw, rh = config['roi']
+                cv2.rectangle(proc_frame, (rx, ry), (rx+rw, ry+rh), (0, 0, 255), 1)
             
             if non_zero_thresh > config['motion_threshold']:
                 print("M", end=" ")
                 cv2.putText(proc_frame, "M", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                display_images[-1] = proc_frame #replace display
+                display_images[-1] = proc_frame 
+                primary_target = None
+                
+                # Check Alarm Type: 'motion' or 'object'
+                if config.get('alarm_type') == 'motion':
+                     # SKIP AI -> Trigger directly on motion
+                     primary_target = ('motion', 100)
 
-                # --- AI DETECTION ---
-                frame_rgba = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGBA)
-                cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
-                detections = net.Detect(cuda_img)
-                
-                current_time = time.time()
-                primary_target = None 
-                
-                for d in detections:
-                    if d.ClassID in TARGET_CLASSES:
-                        class_name = TARGET_CLASSES[d.ClassID]
-                        conf_percent = round(d.Confidence * 100)
-                        
-                        if primary_target is None:
-                            primary_target = (class_name, conf_percent)
-                        
-                        if class_name == 'person' and primary_target[0] != 'person':
-                            primary_target = (class_name, conf_percent)
+                else:
+                    # RUN AI (Standard Object Detection)
+                    frame_rgba = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGBA)
+                    cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
+                    detections = net.Detect(cuda_img)
+                    
+                    for d in detections:
+                        if d.ClassID in TARGET_CLASSES:
+                            class_name = TARGET_CLASSES[d.ClassID]
+                            conf_percent = round(d.Confidence * 100)
+                            
+                            if primary_target is None:
+                                primary_target = (class_name, conf_percent)
+                            
+                            if class_name == 'person' and primary_target[0] != 'person':
+                                primary_target = (class_name, conf_percent)
 
                         # Draw boxes on the OpenCV frame for the Display
                         col_conf = round(255 * d.Confidence)
                         cv2.rectangle(proc_frame, (int(d.Left), int(d.Top)), (int(d.Right), int(d.Bottom)), (0, col_conf, 0), 2)
                         
-                        # Update the display image list with this annotated frame
-                        # (We replace the raw frame we added earlier)
-                        display_images[-1] = proc_frame
+                # Update the display image list with this annotated frame
+                # (We replace the raw frame we added earlier)
+                display_images[-1] = proc_frame
 
-                # --- ACTIONS ---
+                # --- TRIGGER ACTIONS ---
+                current_time = time.time()
                 if primary_target and (current_time - last_save_time > COOLDOWN_SECONDS):
                     t_class, t_conf = primary_target
                     
