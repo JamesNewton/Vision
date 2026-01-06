@@ -58,7 +58,7 @@ The focus of the code is to run efficiently with low energy use by NOT just runn
 
 - `smart_sentry.py` basic code to read out an old standard video stream and process 1 frame in n from that. 
 - `slow_sentry.py` switches to single image captures at a much slower rate, which still works just fine.
-- `multi-sentry.py` supports multiple cameras, including more modern streaming only units like the topo, white still limiting processing. It also supports a tasmota device to ring a doorbell or flash a light when a person is seen. It also writes out a file to trigger a notification via a web server script.
+- `multi-sentry.py` supports multiple cameras, including more modern streaming only units like the topo (and automatically re-connects if the feed freezes), white still limiting processing via customizable "ROI" (Region Of Interest) and time of day limits. It also supports a tasmota device to ring a doorbell or flash a light when a person is seen. It also writes out a file to trigger a notification via a <a href="https://github.com/JamesNewton/MagicLand">web server script</a>.
 
 ## Docker Image
 A new docker image can be produced by building a Docker file. For example:
@@ -117,3 +117,7 @@ echo "LANG=en_US.UTF-8" | sudo tee /etc/default/locale
 echo "LC_ALL=en_US.UTF-8" | sudo tee -a /etc/default/locale
 ```
 You must reboot to see the change.
+
+## Other settings
+
+In the task bar "panel", you can add a temperature monitoring "applet" but it will always show 100'C, which is a BS reading from a sensor that doesn't exist. You can uncheck the "automatic sensor location" and put `/sys/class/thermal/thermal_zone1/` in the Sensor field to get JUST the CPU, and the same but ...zone2 for the GPU. 
