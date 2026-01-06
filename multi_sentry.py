@@ -53,7 +53,7 @@ CAM2_CONFIG = {
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
     # Set to None for full frame.
-    "roi": (100, 120, 535, 230)  
+    "roi": (110, 120, 525, 230)  
 }
 
 CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
@@ -149,7 +149,7 @@ class RtspCamera:
         # Settings to detect frozen cameras (frames all the same)
         last_raw_slice = None
         stale_count = 0
-        STALE_LIMIT = 100 # Approx 5-10 seconds depending on FPS
+        STALE_LIMIT = 200 # Approx 5-10 seconds depending on FPS
 
         while not self.stopped:
             if self.stream is None or not self.stream.isOpened():
@@ -160,9 +160,9 @@ class RtspCamera:
             
             if grabbed and frame is not None:
                 h, w = frame.shape[:2]
-                # just check a 64x64 patch from the center to save compute
-                c_y, c_x = h // 2, w // 2
-                curr_slice = frame[c_y:c_y+64, c_x:c_x+64]
+                # just check a patch from near center to save compute
+                c_y, c_x = h // 4, w // 4
+                curr_slice = frame[c_y:c_y+128, c_x:c_x+128]
                 
                 is_frozen = False
                 if last_raw_slice is not None:
@@ -362,8 +362,8 @@ try:
 
         # --- DISPLAY COMPOSITOR ---
         if display.IsStreaming() and len(display_images) >= 2:
-            # 1. Resize all to a standard height (e.g. 360p) so they stack nicely
-            target_h = 360
+            # Resize all to a standard height (e.g. 360p) so they stack nicely
+            target_h = 400
             resized_imgs = []
             
             for img in display_images:
@@ -372,16 +372,11 @@ try:
                 new_w = int(w * scale)
                 resized = cv2.resize(img, (new_w, target_h))
                 
-                # Add a label so we know which cam is which
-                # (We can't easily get the name here without complicating the list, 
-                # but we know 0 is Linksys, 1 is Tapo)
                 resized_imgs.append(resized)
 
-            # 2. Stitch them side-by-side
             # hstack requires same height, which we just ensured
             combined_img = np.hstack(resized_imgs)
             
-            # 3. Render
             frame_rgba = cv2.cvtColor(combined_img, cv2.COLOR_BGR2RGBA)
             cuda_display = jetson.utils.cudaFromNumpy(frame_rgba)
             display.Render(cuda_display)
