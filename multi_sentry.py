@@ -34,22 +34,31 @@ CAM1_CONFIG = {
     "url": "http://192.168.0.112/img/snapshot.cgi",
     "motion_threshold": 800,
     "alpha": 0.2,
+
+    # Use ['motion'] for simple motion detection (No AI).
+    # Use ['person', 'dog'] to run AI and only alert on those objects.
     "alarm_class": ['person'],
-    "alarm_type": "object", # 'object' = AI, 'motion' = Simple Motion
+    # Active from (24h format HH;mm)
+    "start_time": "00:00",
+    "end_time": "23:59",
+
+    # ROI: Region of Interest (x, y, width, height)
+    # The AI will ONLY process this box. 
     "roi": None # Full frame
 }
 
 # 2. Tapo C120 (RTSP Stream 2 Mode)
-# Note the "/stream2" at the end for Low CPU usage!
 CAM2_CONFIG = {
     "name": "Tapo",
     "type": "rtsp",
     "url": "rtsp://192.168.0.102:554/stream2",
     "motion_threshold": 1200, 
     "alpha": 0.3,
-    "alarm_class": ['cat', 'dog', 'bear'],
-    "alarm_type": "motion", 
     
+    "alarm_class": ['motion'], # Just look for movement (e.g. at night)
+    
+    "start_time": "20:00", # Only active at night
+    "end_time": "06:00",   # Crosses midnight correctly
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
     # Set to None for full frame.
@@ -62,10 +71,24 @@ CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
 
 def tasmota_cmd(cmd):
     try:
-        # TIMEOUT FIX: Wait for connection (None), but don't wait for reply (0.05)
         requests.get(f"{TASMOTA_URL}{cmd}", timeout=(None, 0.05))
     except:
         pass
+
+def is_time_active(start_str, end_str):
+    """
+    Checks if current time is within range (handles midnight crossing).
+    """
+    if not start_str or not end_str: return True
+    
+    now = datetime.datetime.now().time()
+    start = datetime.datetime.strptime(start_str, "%H:%M").time()
+    end = datetime.datetime.strptime(end_str, "%H:%M").time()
+    
+    if start <= end:
+        return start <= now <= end
+    else: # Crosses midnight (e.g. 22:00 to 06:00)
+        return now >= start or now <= end
 
 def check_motion_level(frame, avg_frame, alpha):
     """
@@ -255,7 +278,15 @@ try:
         print(".                    ", end="\r", flush=True) #restart the line.
 
         for config, cam_obj in active_cams:
-            
+            # If outside operating hours, skip everything (saves max CPU)
+            if not is_time_active(config.get('start_time'), config.get('end_time')):
+                # Add a dummy frame if streaming so the display doesn't break
+                if display.IsStreaming():
+                    dummy = np.zeros((360, 640, 3), dtype=np.uint8)
+                    cv2.putText(dummy, "SLEEPING", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (100,100,100), 2)
+                    display_images.append(dummy)
+                continue
+
             frame = cam_obj.read()
             
             # --- DISPLAY PREP ---
@@ -279,60 +310,80 @@ try:
             proc_frame = cam_obj.read()
             if proc_frame is None: continue
 
-            # If ROI is set ONLY look for motion in that box. 
+            # If ROI is set ONLY look for motion / objects in that box. 
             # This saves CPU and ignores wind/trees outside the box.
+            roi_x, roi_y = 0, 0 # Offsets for drawing later
             motion_input = proc_frame
+            
             if config.get('roi'):
-                rx, ry, rw, rh = config['roi']
+                roi_x, roi_y, roi_w, roi_h = config['roi']
                 # Safety check for image bounds
                 h, w = proc_frame.shape[:2]
-                if rx+rw <= w and ry+rh <= h:
-                    motion_input = proc_frame[ry:ry+rh, rx:rx+rw]
+                if roi_x+roi_w <= w and roi_y+roi_h <= h:
+                    motion_input = proc_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
             # Note: avg_frame will automatically size itself to the ROI
             non_zero_thresh, cam_obj.avg_frame = check_motion_level(
                 motion_input, cam_obj.avg_frame, config['alpha']
             )
 
             print(non_zero_thresh, end=" ")
-            if config.get('roi'):
-                rx, ry, rw, rh = config['roi']
-                cv2.rectangle(proc_frame, (rx, ry), (rx+rw, ry+rh), (0, 0, 255), 1)
             
+            # Draw ROI box on the main frame so we can see where we are monitoring
+            if config.get('roi'):
+                cv2.rectangle(proc_frame, (roi_x, roi_y), (roi_x+roi_w, roi_y+roi_h), (255, 0, 0), 1)
+
             if non_zero_thresh > config['motion_threshold']:
                 print("M", end=" ")
                 cv2.putText(proc_frame, "M", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
                 display_images[-1] = proc_frame 
-                primary_target = None
                 
-                # Check Alarm Type: 'motion' or 'object'
-                if config.get('alarm_type') == 'motion':
-                     # SKIP AI -> Trigger directly on motion
-                     primary_target = ('motion', 100)
+                primary_target = None
+                alarm_classes = config.get("alarm_class", [])
 
+                # CASE A: 'motion' is in the allowed classes -> Trigger immediately
+                if 'motion' in alarm_classes:
+                    primary_target = ('motion', 100)
+                    # Draw a box around the ROI to show what triggered it
+                    if config.get('roi'):
+                        cv2.rectangle(proc_frame, (roi_x, roi_y), (roi_x+roi_w, roi_y+roi_h), (0, 0, 255), 2)
+
+                # CASE B: Object Detection Required
                 else:
-                    # RUN AI (Standard Object Detection)
-                    frame_rgba = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGBA)
+                    # RUN AI on the CROPPED ROI (motion_input)
+                    # This is much faster/more accurate than resizing the full frame
+                    frame_rgba = cv2.cvtColor(motion_input, cv2.COLOR_BGR2RGBA)
                     cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
                     detections = net.Detect(cuda_img)
                     
                     for d in detections:
                         if d.ClassID in TARGET_CLASSES:
                             class_name = TARGET_CLASSES[d.ClassID]
-                            conf_percent = round(d.Confidence * 100)
                             
-                            if primary_target is None:
-                                primary_target = (class_name, conf_percent)
-                            
-                            if class_name == 'person' and primary_target[0] != 'person':
-                                primary_target = (class_name, conf_percent)
+                            # Only accept if this class is in our list
+                            if class_name in alarm_classes:
+                                conf_percent = round(d.Confidence * 100)
+                                
+                                if primary_target is None:
+                                    primary_target = (class_name, conf_percent)
+                                
+                                # Priority override
+                                if class_name == 'person' and primary_target[0] != 'person':
+                                    primary_target = (class_name, conf_percent)
 
-                        # Draw boxes on the OpenCV frame for the Display
-                        col_conf = round(255 * d.Confidence)
-                        cv2.rectangle(proc_frame, (int(d.Left), int(d.Top)), (int(d.Right), int(d.Bottom)), (0, col_conf, 0), 2)
-                        
-                # Update the display image list with this annotated frame
-                # (We replace the raw frame we added earlier)
-                display_images[-1] = proc_frame
+                                # Draw Boxes
+                                # IMPORTANT: We must add the ROI offset (roi_x, roi_y) 
+                                # because the AI coordinates are relative to the crop
+                                left = int(d.Left) + roi_x
+                                top = int(d.Top) + roi_y
+                                right = int(d.Right) + roi_x
+                                bottom = int(d.Bottom) + roi_y
+                                
+                                col_conf = round(255 * d.Confidence)
+                                cv2.rectangle(proc_frame, (left, top), (right, bottom), (0, col_conf, 0), 2)
+                    
+                    # Update the display image list with this annotated frame
+                    # (We replace the raw frame we added earlier)
+                    display_images[-1] = proc_frame
 
                 # --- TRIGGER ACTIONS ---
                 current_time = time.time()
@@ -343,8 +394,9 @@ try:
                     filename = f"{config['name']}_{timestamp}.jpg"
                     save_path = os.path.join(LOG_DIR, filename)
                     
+                    # Save the FULL frame (context), not just the crop
                     cv2.imwrite(save_path, proc_frame)
-
+                    
                     date_str = datetime.datetime.now().strftime("%Y-%m-%d")
                     log_path = os.path.join(LOG_DIR, f"{date_str}_detection_log.csv")
                     if not os.path.exists(log_path):
@@ -359,7 +411,8 @@ try:
                     print(f"Alert [{config['name']}]: {t_class} {t_conf}%")
                     
                     if (current_time - last_bell_time > DOORBELL_SECONDS):
-                        if t_class in config["alarm_class"]:
+                        # Simple rule: Persons ring bell, everything else blinks light
+                        if t_class == 'person':
                             tasmota_cmd("Power1%20Blink") 
                         else:
                             tasmota_cmd("Power2%20Blink")
