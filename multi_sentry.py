@@ -149,7 +149,7 @@ class RtspCamera:
         # Settings to detect frozen cameras (frames all the same)
         last_raw_slice = None
         stale_count = 0
-        STALE_LIMIT = 200 # Approx 5-10 seconds depending on FPS
+        STALE_LIMIT = 200 # Approx 10-20 seconds depending on FPS
 
         while not self.stopped:
             if self.stream is None or not self.stream.isOpened():
@@ -160,12 +160,20 @@ class RtspCamera:
             
             if grabbed and frame is not None:
                 h, w = frame.shape[:2]
-                # just check a patch from near center to save compute
-                c_y, c_x = h // 4, w // 4
-                curr_slice = frame[c_y:c_y+128, c_x:c_x+128]
+                # Check a 128x128 patch from the TRUE center
+                c_y, c_x = h // 2, w // 2
+                start_y = max(0, c_y - 64)
+                start_x = max(0, c_x - 64)
+                
+                curr_slice = frame[start_y:start_y+128, start_x:start_x+128]
                 
                 is_frozen = False
-                if last_raw_slice is not None:
+                
+                # Calculate brightness. If it's pitch black (mean < 5), 
+                # we expect NO noise, so we skip the frozen check.
+                mean_brightness = np.mean(curr_slice)
+                
+                if last_raw_slice is not None and mean_brightness > 5:
                     # Quick check: Are they bit-exact identical?
                     # Real sensors have noise; identical = frozen stream.
 
@@ -175,6 +183,9 @@ class RtspCamera:
                         is_frozen = True
                     else:
                         stale_count = 0 # Reset if we see changes
+                else:
+                    # Reset counter if it's too dark to tell, or first frame
+                    stale_count = 0
                 
                 last_raw_slice = curr_slice.copy() # Save for next cycle
 
