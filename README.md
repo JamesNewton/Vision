@@ -43,6 +43,7 @@ xhost + #permission to show a local camera preview
 sudo docker run --runtime nvidia -it --rm \
     --network host \
     -e DISPLAY=:0 \
+    -e TZ=America/Los_Angeles \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v /mnt/sdcard:/mnt/sdcard \
     dustynv/jetson-inference:r32.4.3
@@ -52,6 +53,7 @@ cd /mnt/sdcard
 pip install requests # required for tasmota support
 python3 <whicever>.py
 ```
+Change the TZ to your time zone code as needed. This line is only needed for the multi_sentry.py to support the time limits using the local time vs UTC.
 
 ## Code
 The focus of the code is to run efficiently with low energy use by NOT just running compute intensive things like image recognition on every frame, and by reducing the frame rate to just a few per second. Instead, it uses simple OpenCV methods for frame subtraction to detect motion, and *then* do the fancy stuff when there is a reason for it.
