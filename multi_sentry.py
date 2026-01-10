@@ -57,12 +57,12 @@ CAM2_CONFIG = {
     
     "alarm_class": ['motion'], # Just look for movement (e.g. at night)
     
-    "start_time": "20:00", # Only active at night
-    "end_time": "06:00",   # Crosses midnight correctly
+    "start_time": "18:00", # Only active at night
+    "end_time": "08:00",   # Crosses midnight correctly
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
     # Set to None for full frame.
-    "roi": (110, 120, 525, 230)  
+    "roi": (110, 120, 500, 220)  
 }
 
 CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
@@ -123,6 +123,9 @@ class HttpCamera:
         self.avg_frame = None
         self.last_valid_frame = None # For display persistence
 
+    def set_active(self, state):
+        pass # HTTP camera doesn't need a background thread sleep
+
     def read(self):
         try:
             r = requests.get(self.url, timeout=0.5)
@@ -141,7 +144,7 @@ class HttpCamera:
 class RtspCamera:
     """
     Handles cameras that require persistent RTSP connection (Tapo).
-    Includes 'Frozen Frame' detection to auto-reconnect if the stream hangs.
+    Optimized to sleep deeply and throttle frozen-frame checks.
     """
     def __init__(self, config):
         self.url = config['url']
@@ -150,13 +153,18 @@ class RtspCamera:
         self.frame = None
         self.last_valid_frame = None
         
-        # Stream Management
+        # State Management
+        self.active = True  # Controls deep sleep
         self.stopped = False
         self.stream = None
-        self.lock = threading.Lock() # Prevent reading while resetting
+        self.lock = threading.Lock()
         
         # Start background drainer immediately
         threading.Thread(target=self.update, daemon=True).start()
+
+    def set_active(self, state):
+        """Enable or disable the stream to save CPU"""
+        self.active = state
 
     def start_stream(self):
         """Internal: Safely opens the capture"""
@@ -172,57 +180,55 @@ class RtspCamera:
         # Settings to detect frozen cameras (frames all the same)
         last_raw_slice = None
         stale_count = 0
-        STALE_LIMIT = 200 # Approx 10-20 seconds depending on FPS
+        STALE_LIMIT = 5 # Restart after 5 failed *checks* (approx 5 seconds)
+        frame_counter = 0
 
         while not self.stopped:
-            if self.stream is None or not self.stream.isOpened():
-                time.sleep(1)
+            # DEEP SLEEP: If inactive, release everything and wait
+            if not self.active:
+                if self.stream and self.stream.isOpened():
+                    self.stream.release()
+                time.sleep(1.0) # Sleep long to save CPU
                 continue
+
+            # RECONNECT: If we woke up but have no stream, connect
+            if self.stream is None or not self.stream.isOpened():
+                self.start_stream()
 
             grabbed, frame = self.stream.read()
             
             if grabbed and frame is not None:
-                h, w = frame.shape[:2]
-                # Check a 128x128 patch from the TRUE center
-                c_y, c_x = h // 2, w // 2
-                start_y = max(0, c_y - 64)
-                start_x = max(0, c_x - 64)
+                frame_counter += 1
                 
-                curr_slice = frame[start_y:start_y+128, start_x:start_x+128]
-                
-                is_frozen = False
-                
-                # Calculate brightness. If it's pitch black (mean < 5), 
-                # we expect NO noise, so we skip the frozen check.
-                mean_brightness = np.mean(curr_slice)
-                
-                if last_raw_slice is not None and mean_brightness > 5:
-                    # Quick check: Are they bit-exact identical?
-                    # Real sensors have noise; identical = frozen stream.
+                # --- THROTTLED FROZEN CHECK ---
+                # Only check once every 30 frames (~1 second) to save CPU
+                if frame_counter % 30 == 0:
+                    h, w = frame.shape[:2]
+                    c_y, c_x = h // 2, w // 2
+                    curr_slice = frame[max(0,c_y-64):c_y+64, max(0,c_x-64):c_x+64]
+                    
+                    # Brightness check (don't check if pitch black)
+                    if np.mean(curr_slice) > 5 and last_raw_slice is not None:
+                        diff = cv2.absdiff(curr_slice, last_raw_slice)
+                        if np.count_nonzero(diff) == 0:
+                            stale_count += 1
+                        else:
+                            # Reset counter if it's too dark to tell, or first frame
+                            stale_count = 0 
+                    
+                    last_raw_slice = curr_slice.copy() # Save for next cycle
 
-                    diff = cv2.absdiff(curr_slice, last_raw_slice)
-                    if np.count_nonzero(diff) == 0:
-                        stale_count += 1
-                        is_frozen = True
-                    else:
-                        stale_count = 0 # Reset if we see changes
-                else:
-                    # Reset counter if it's too dark to tell, or first frame
-                    stale_count = 0
+                    if stale_count > STALE_LIMIT:
+                        print(f"[{self.name}] FROZEN DETECTED! Restarting...")
+                        with self.lock: self.frame = None 
+                        self.start_stream()
+                        stale_count = 0
+                        last_raw_slice = None
                 
-                last_raw_slice = curr_slice.copy() # Save for next cycle
-
-                if stale_count > STALE_LIMIT:
-                    print(f"[{self.name}] FROZEN DETECTED! Restarting stream...")
-                    with self.lock:
-                        self.frame = None # Triggers 'OFFLINE' in main loop
-                    self.start_stream()
-                    stale_count = 0
-                    last_raw_slice = None
-                elif not is_frozen:
-                    with self.lock:
-                        self.frame = frame
-                        self.last_valid_frame = frame
+                # Update the valid frame
+                with self.lock:
+                    self.frame = frame
+                    self.last_valid_frame = frame
                 
                 # Tiny sleep to yield CPU, but don't overflow buffer
                 time.sleep(0.01) 
@@ -242,7 +248,7 @@ class RtspCamera:
     def stop(self):
         self.stopped = True
         if self.stream: self.stream.release()
-
+        
 # --- SETUP ---
 print("Initializing AI...")
 net = jetson.inference.detectNet("ssd-mobilenet-v2", threshold=CONFIDENCE_THRESHOLD)
@@ -275,15 +281,21 @@ try:
         time.sleep(POLL_INTERVAL)
         
         display_images = []
-        print(".                    ", end="\r", flush=True) #restart the line.
+        print(".                    ", end="\r", flush=True)
 
         for config, cam_obj in active_cams:
-            # If outside operating hours, skip everything (saves max CPU)
-            if not is_time_active(config.get('start_time'), config.get('end_time')):
-                # Add a dummy frame if streaming so the display doesn't break
+            # CHECK SCHEDULE
+            is_active = is_time_active(config.get('start_time'), config.get('end_time'))
+            
+            # TELL CAMERA TO SLEEP/WAKE
+            # This shuts down the background RTSP thread if inactive
+            cam_obj.set_active(is_active)
+
+            if not is_active:
+                # Add dummy frame for display if needed
                 if display.IsStreaming():
                     dummy = np.zeros((360, 640, 3), dtype=np.uint8)
-                    cv2.putText(dummy, "SLEEPING", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (100,100,100), 2)
+                    cv2.putText(dummy, "SLEEPING", (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (50,50,50), 2)
                     display_images.append(dummy)
                 continue
 
