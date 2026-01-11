@@ -1,3 +1,13 @@
+
+import os
+# SILENCE FFmpeg SEI ERRORS (Must be before importing cv2)
+#run with 
+#python3 multi_sentry.py 2> /dev/null
+#if this doesn't work
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;quiet" 
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8" # The specific flag for FFmpeg silence
+
 import jetson.inference
 import jetson.utils
 import cv2
@@ -10,7 +20,6 @@ after docker startup, or build a new image from the original dustynv
 '''
 import time
 import datetime
-import os
 import threading
 
 # --- CONFIGURATION ---
@@ -51,7 +60,8 @@ CAM1_CONFIG = {
 CAM2_CONFIG = {
     "name": "Tapo",
     "type": "rtsp",
-    "url": "rtsp://192.168.0.102:554/stream2",
+    # stream1 2560x1440 for high detail, stream2 640x360 for low res / faster
+    "url": "rtsp://192.168.0.102:554/stream1",
     "motion_threshold": 1200, 
     "alpha": 0.3,
     
@@ -62,7 +72,7 @@ CAM2_CONFIG = {
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
     # Set to None for full frame.
-    "roi": (110, 120, 500, 220)  
+    "roi": (440, 480, 2100, 920) 
 }
 
 CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
@@ -143,12 +153,17 @@ class HttpCamera:
 
 class RtspCamera:
     """
-    Handles cameras that require persistent RTSP connection (Tapo).
-    Optimized to sleep deeply and throttle frozen-frame checks.
+    Optimized RTSP Handler:
+    1. Decodes Stream
+    2. IMMEDIATELY crops to ROI (Saves Memory/CPU downstream)
+    3. Throttles frozen checks
+    4. Supports Deep Sleep
     """
     def __init__(self, config):
         self.url = config['url']
         self.name = config['name']
+        self.roi = config.get('roi') # Capture ROI config
+        
         self.avg_frame = None
         self.frame = None
         self.last_valid_frame = None
@@ -198,23 +213,34 @@ class RtspCamera:
             grabbed, frame = self.stream.read()
             
             if grabbed and frame is not None:
+                # We cut the frame down BEFORE storing it.
+                # This drastically reduces the size of 'self.frame'
+                if self.roi:
+                    rx, ry, rw, rh = self.roi
+                    h, w = frame.shape[:2]
+                    # Ensure ROI is valid for this resolution
+                    if rx+rw <= w and ry+rh <= h:
+                        frame = frame[ry:ry+rh, rx:rx+rw]
+                
                 frame_counter += 1
                 
-                # --- THROTTLED FROZEN CHECK ---
-                # Only check once every 30 frames (~1 second) to save CPU
+                # --- THROTTLED FROZEN CHECK (On the cropped frame) ---
                 if frame_counter % 30 == 0:
                     h, w = frame.shape[:2]
-                    c_y, c_x = h // 2, w // 2
-                    curr_slice = frame[max(0,c_y-64):c_y+64, max(0,c_x-64):c_x+64]
-                    
+                    # Safe slice calculation
+                    cy, cx = h // 2, w // 2
+                    sy, sx = max(0, cy-64), max(0, cx-64)
+                    curr_slice = frame[sy:min(h, sy+128), sx:min(w, sx+128)]
                     # Brightness check (don't check if pitch black)
                     if np.mean(curr_slice) > 5 and last_raw_slice is not None:
-                        diff = cv2.absdiff(curr_slice, last_raw_slice)
-                        if np.count_nonzero(diff) == 0:
-                            stale_count += 1
-                        else:
-                            # Reset counter if it's too dark to tell, or first frame
-                            stale_count = 0 
+                        # Ensure shapes match before comparing
+                        if curr_slice.shape == last_raw_slice.shape:
+                            diff = cv2.absdiff(curr_slice, last_raw_slice)
+                            if np.count_nonzero(diff) == 0: 
+                                stale_count += 1
+                            else: 
+                                # Reset counter if it's too dark to tell, or first frame
+                                stale_count = 0 
                     
                     last_raw_slice = curr_slice.copy() # Save for next cycle
 
@@ -236,9 +262,8 @@ class RtspCamera:
             else:
                 # Standard 'Connection Lost' logic
                 print(f"[{self.name}] Signal lost. Retrying...")
-                with self.lock:
-                    self.frame = None
-                time.sleep(2)
+                with self.lock: self.frame = None
+                time.sleep(5.0)
                 self.start_stream()
 
     def read(self):
@@ -248,7 +273,7 @@ class RtspCamera:
     def stop(self):
         self.stopped = True
         if self.stream: self.stream.release()
-        
+
 # --- SETUP ---
 print("Initializing AI...")
 net = jetson.inference.detectNet("ssd-mobilenet-v2", threshold=CONFIDENCE_THRESHOLD)
@@ -322,28 +347,16 @@ try:
             proc_frame = cam_obj.read()
             if proc_frame is None: continue
 
-            # If ROI is set ONLY look for motion / objects in that box. 
-            # This saves CPU and ignores wind/trees outside the box.
-            roi_x, roi_y = 0, 0 # Offsets for drawing later
-            motion_input = proc_frame
+            # --- MOTION LOGIC ---
+            # NOTE: 'proc_frame' is ALREADY cropped to the ROI by the thread.
+            # We treat it as the full image here.
             
-            if config.get('roi'):
-                roi_x, roi_y, roi_w, roi_h = config['roi']
-                # Safety check for image bounds
-                h, w = proc_frame.shape[:2]
-                if roi_x+roi_w <= w and roi_y+roi_h <= h:
-                    motion_input = proc_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
-            # Note: avg_frame will automatically size itself to the ROI
             non_zero_thresh, cam_obj.avg_frame = check_motion_level(
-                motion_input, cam_obj.avg_frame, config['alpha']
+                proc_frame, cam_obj.avg_frame, config['alpha']
             )
 
             print(non_zero_thresh, end=" ")
             
-            # Draw ROI box on the main frame so we can see where we are monitoring
-            if config.get('roi'):
-                cv2.rectangle(proc_frame, (roi_x, roi_y), (roi_x+roi_w, roi_y+roi_h), (255, 0, 0), 1)
-
             if non_zero_thresh > config['motion_threshold']:
                 print("M", end=" ")
                 cv2.putText(proc_frame, "M", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
@@ -355,15 +368,14 @@ try:
                 # CASE A: 'motion' is in the allowed classes -> Trigger immediately
                 if 'motion' in alarm_classes:
                     primary_target = ('motion', 100)
-                    # Draw a box around the ROI to show what triggered it
-                    if config.get('roi'):
-                        cv2.rectangle(proc_frame, (roi_x, roi_y), (roi_x+roi_w, roi_y+roi_h), (0, 0, 255), 2)
+                    # We are already looking at the ROI, so frame border is the ROI border
+                    h, w = proc_frame.shape[:2]
+                    cv2.rectangle(proc_frame, (0, 0), (w, h), (0, 0, 255), 2)
 
                 # CASE B: Object Detection Required
                 else:
-                    # RUN AI on the CROPPED ROI (motion_input)
-                    # This is much faster/more accurate than resizing the full frame
-                    frame_rgba = cv2.cvtColor(motion_input, cv2.COLOR_BGR2RGBA)
+                    # RUN AI on the ROI
+                    frame_rgba = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGBA)
                     cuda_img = jetson.utils.cudaFromNumpy(frame_rgba)
                     detections = net.Detect(cuda_img)
                     
@@ -382,16 +394,8 @@ try:
                                 if class_name == 'person' and primary_target[0] != 'person':
                                     primary_target = (class_name, conf_percent)
 
-                                # Draw Boxes
-                                # IMPORTANT: We must add the ROI offset (roi_x, roi_y) 
-                                # because the AI coordinates are relative to the crop
-                                left = int(d.Left) + roi_x
-                                top = int(d.Top) + roi_y
-                                right = int(d.Right) + roi_x
-                                bottom = int(d.Bottom) + roi_y
-                                
                                 col_conf = round(255 * d.Confidence)
-                                cv2.rectangle(proc_frame, (left, top), (right, bottom), (0, col_conf, 0), 2)
+                                cv2.rectangle(proc_frame, (int(d.Left), int(d.Top)), (int(d.Right), int(d.Bottom)), (0, col_conf, 0), 2)
                     
                     # Update the display image list with this annotated frame
                     # (We replace the raw frame we added earlier)
