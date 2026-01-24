@@ -57,7 +57,7 @@ CAM2_CONFIG = {
     
     "alarm_class": ['motion'], # Just look for movement (e.g. at night)
     
-    "start_time": "18:00", # Only active at night
+    "start_time": "17:00", # Only active at night
     "end_time": "08:00",   # Crosses midnight correctly
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
@@ -102,7 +102,7 @@ def check_motion_level(frame, avg_frame, alpha):
     # Initialize background on first frame
     if avg_frame is None:
         avg_frame = gray.astype("float")
-        return 0, avg_frame
+        return 0, avg_frame, None
 
     # Update background
     cv2.accumulateWeighted(gray, avg_frame, alpha)
@@ -111,7 +111,7 @@ def check_motion_level(frame, avg_frame, alpha):
     frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(avg_frame))
     thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
     
-    return np.count_nonzero(thresh), avg_frame
+    return np.count_nonzero(thresh), avg_frame, thresh
 
 # --- CAMERA CLASSES ---
 
@@ -334,10 +334,11 @@ try:
                 if roi_x+roi_w <= w and roi_y+roi_h <= h:
                     motion_input = proc_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
             # Note: avg_frame will automatically size itself to the ROI
-            non_zero_thresh, cam_obj.avg_frame = check_motion_level(
+            non_zero_thresh, cam_obj.avg_frame, motion_mask = check_motion_level(
                 motion_input, cam_obj.avg_frame, config['alpha']
             )
-
+            if motion_mask is not None: # add the mask back into the input in color
+                motion_input[motion_mask > 0] = [0, 0, 128]
             print(non_zero_thresh, end=" ")
             
             # Draw ROI box on the main frame so we can see where we are monitoring
