@@ -338,7 +338,7 @@ try:
                 motion_input, cam_obj.avg_frame, config['alpha']
             )
             if motion_mask is not None: # add the mask back into the input in color
-                motion_input[motion_mask > 0] = [0, 0, 128]
+                motion_input[motion_mask > 0] = [0, 0, 64]
             print(non_zero_thresh, end=" ")
             
             # Draw ROI box on the main frame so we can see where we are monitoring
