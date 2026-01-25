@@ -337,8 +337,10 @@ try:
             non_zero_thresh, cam_obj.avg_frame, motion_mask = check_motion_level(
                 motion_input, cam_obj.avg_frame, config['alpha']
             )
-            if motion_mask is not None: # add the mask back into the input in color
-                motion_input[motion_mask > 0] = [0, 0, 64]
+            alarm_classes = config.get("alarm_class", [])
+            if motion_mask is not None and 'motion' in alarm_classes: # add the mask back into the input in color
+                tint_color = (20, 20, 80, 0)
+                cv2.add(motion_input, tint_color, dst=motion_input, mask=motion_mask)
             print(non_zero_thresh, end=" ")
             
             # Draw ROI box on the main frame so we can see where we are monitoring
@@ -351,7 +353,6 @@ try:
                 display_images[-1] = proc_frame 
                 
                 primary_target = None
-                alarm_classes = config.get("alarm_class", [])
 
                 # CASE A: 'motion' is in the allowed classes -> Trigger immediately
                 if 'motion' in alarm_classes:
