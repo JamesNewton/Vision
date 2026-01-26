@@ -113,6 +113,32 @@ def check_motion_level(frame, avg_frame, alpha):
     
     return np.count_nonzero(thresh), avg_frame, thresh
 
+def enhance_night_image(frame, avg_brightness):
+    """
+    Inverse-Dehazing for Night Vision.
+    Boosts dark regions while preserving bright lights.
+    Auto-disables if the scene is already bright.
+    """
+    # (Threshold 80/255 is roughly twilight/office lighting)
+    if avg_brightness > 80:
+        return frame
+    # Math: t = 1 - omega * min(inverted_image)
+    # Simplified: t = 1 - omega * (1 - local_max_brightness)
+    kernel = np.ones((5, 5), np.uint8) # kernel size for local max brightness
+    local_max = cv2.dilate(frame, kernel) #each kernal becomes the brightest part
+    local_max = cv2.GaussianBlur(local_max, (21, 21), 0) #blur those changes
+    # Calculate 't' (0.0 to 1.0) Lower 't' = it's darker = More boost needed.
+    # base value sets max boost, and prevents dividing by zero
+    t = 0.25 + 0.75 * (local_max.astype(float) / 255.0)
+    # Because 't' is a 3-channel matrix, this boosts colors individually
+    enhanced = frame.astype(float) / t
+    # If brightness is 0 (Pitch Black), blend = 1.0 (Full Boost)
+    # If brightness is 80 (Twilight), blend = 0.0 (No Boost)
+    blend_factor = max(0, (80 - avg_brightness) / 80.0)
+    final = frame.astype(float) * (1 - blend_factor) + enhanced * blend_factor
+    # Clip back to valid image range
+    return np.clip(final, 0, 255).astype(np.uint8)
+
 # --- CAMERA CLASSES ---
 
 class HttpCamera:
@@ -339,7 +365,7 @@ try:
             )
             alarm_classes = config.get("alarm_class", [])
             if motion_mask is not None and 'motion' in alarm_classes: # add the mask back into the input in color
-                tint_color = (20, 20, 80, 0)
+                tint_color = (30, 30, 60, 0)
                 cv2.add(motion_input, tint_color, dst=motion_input, mask=motion_mask)
             print(non_zero_thresh, end=" ")
             
@@ -407,10 +433,11 @@ try:
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = f"{config['name']}_{timestamp}.jpg"
                     save_path = os.path.join(LOG_DIR, filename)
-                    
+                    avg_brightness = np.mean(cam_obj.avg_frame)
+                    final_image = enhance_night_image(proc_frame, avg_brightness)
                     # Save the FULL frame (context), not just the crop
-                    cv2.imwrite(save_path, proc_frame)
-                    
+                    cv2.imwrite(save_path, final_image)
+
                     date_str = datetime.datetime.now().strftime("%Y-%m-%d")
                     log_path = os.path.join(LOG_DIR, f"{date_str}_detection_log.csv")
                     if not os.path.exists(log_path):
