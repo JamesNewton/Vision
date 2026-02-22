@@ -14,7 +14,7 @@ import os
 import threading
 
 # --- CONFIGURATION ---
-TASMOTA_URL = "http://192.168.0.178/cm?cmnd=" 
+TASMOTA_URL = "http://192.168.0.179/cm?cmnd=" 
 LOG_DIR = "/mnt/sdcard/captures"
 ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
 
