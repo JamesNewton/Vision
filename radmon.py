@@ -3,6 +3,10 @@ import time
 import os
 from datetime import datetime
 
+LOG_INTERVAL = 30 #seconds
+LOG_DIR = "/mnt/sdcard/captures"
+ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
+
 # Setup Serial
 ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
 
@@ -41,8 +45,11 @@ try:
                 f.write(f"{timestamp},{cpm}\n")
             
             print(f"[{timestamp}] CPM: {cpm}")
+
+            with open(ALERT_FILE, "w") as f:
+                f.write(f"{now}, Radiation, CPM, {cpm}, \n")
             
-        time.sleep(5) 
+        time.sleep(LOG_INTERVAL) 
 except KeyboardInterrupt:
     ser.close()
     print("\nLogging stopped.")
