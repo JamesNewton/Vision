@@ -2,10 +2,9 @@ import math
 from datetime import datetime
 
 class DaylightMonitor:
-    def __init__(self, lat, lon, tz_offset):
+    def __init__(self, lat, lon):
         self.lat = lat
         self.lon = lon
-        self.tz_offset = tz_offset
         self.last_calc_date = None
         self.sunrise_mins = 0
         self.sunset_mins = 0
@@ -41,16 +40,17 @@ class DaylightMonitor:
     def update(self):
         now = datetime.now()
         current_date = now.date()
-        # Only do the math if we haven't done it today
+        
+        # Check if we need to calculate for today
         if current_date != self.last_calc_date:
-            srise, sset = self.get_sunrise_sunset(self.lat, self.lon, self.tz_offset, now)
+            current_tz_offset = now.astimezone().utcoffset().total_seconds() / 3600
+            srise, sset = self.get_sunrise_sunset(self.lat, self.lon, current_tz_offset, now)
             self.sunrise = self.fmt(srise)
             self.sunset = self.fmt(sset)
-            # Convert "HH:MM" strings to minutes-since-midnight for blazing fast comparisons
             self.sunrise_mins = srise
             self.sunset_mins = sset
             self.last_calc_date = current_date
-            #print("update")
+            
         return now
 
     def is_it_dark(self):
@@ -63,13 +63,11 @@ class DaylightMonitor:
         return self.sunrise, self.sunset
 
 if __name__ == "__main__":
-    # --- Test for Escondido, CA (using standard Pacific Time, UTC-8) ---
-    # Note: Adjust tz_offset to -7 if testing during Daylight Saving Time
-    monitor = DaylightMonitor(lat=33.11, lon=-117.08, tz_offset=-8)
+    # --- Test for Escondido, CA ---
+    monitor = DaylightMonitor(lat=33.11, lon=-117.08)
     rise, set = monitor.get_rise_set()
     print(f"Sunrise: {rise}, Sunset: {set}") #on 2/28, Sunrise: 06:24, Sunset: 17:38
     if (monitor.is_it_dark()):
         print("night")
     else:
         print("day")
-
