@@ -53,4 +53,3 @@ try:
 except KeyboardInterrupt:
     ser.close()
     print("\nLogging stopped.")
-
