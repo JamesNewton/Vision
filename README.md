@@ -1,5 +1,5 @@
 # Vision
-Just some experiments with vision 
+Just some experiments with local vision (e.g. no cloud dependencies)
 
 ## Setup
 An Aaeon Boxer B with an extra many GB SDcard to provide additional storage. These little units are available for next to nothing today, used or "new old stock". They have:
@@ -8,7 +8,7 @@ An Aaeon Boxer B with an extra many GB SDcard to provide additional storage. The
 - Quad core ARM A57 Processor
 - NVIDIA Jetson nano GPU, etc...
 
-Because there is so little space available on the internal drive, docker needs to use the sdcard
+Because there is so little space available on the internal drive, even installed software like docker needs to use the sdcard
 and it needs to automount. Make a perminant mount point:
 <br>`sudo mkdir -p /mnt/sdcard`
 <br> use 
@@ -60,7 +60,11 @@ The focus of the code is to run efficiently with low energy use by NOT just runn
 
 - `smart_sentry.py` basic code to read out an old standard video stream and process 1 frame in n from that. 
 - `slow_sentry.py` switches to single image captures at a much slower rate, which still works just fine.
-- `multi-sentry.py` supports multiple cameras, including more modern streaming only units like the topo (and automatically re-connects if the feed freezes), white still limiting processing via customizable "ROI" (Region Of Interest) and time of day limits. It also supports a tasmota device to ring a doorbell or flash a light when a person is seen. It also writes out a file to trigger a notification via a <a href="https://github.com/JamesNewton/MagicLand">web server script</a>.
+- `check_coup_door.py` is an attempt to use a camera to check if a door is open by comparing the brightness of the door area with the surrounding area of the same color. 
+- `radmon.py` isn't vision related. It just interfaces with a radiation monitor to integrate that data.
+- `multi-sentry.py` supports multiple cameras, including more modern streaming only units like the topo (and automatically re-connects if the feed freezes), white still limiting processing via customizable "ROI" (Region Of Interest) and time of day limits including offsets from sunrise or sunset, which are estimated via lat / lon. It also supports a tasmota device to ring a doorbell or flash a light when a person is seen. It also writes out a file to trigger a notification via a <a href="https://github.com/JamesNewton/MagicLand">web server script</a>.
+
+
 
 ## Docker Image
 A new docker image can be produced by building a Docker file. For example:
