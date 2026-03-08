@@ -13,7 +13,12 @@ import datetime
 import os
 import threading
 
+# Local Libraries
+from sunrise_sunset import DaylightMonitor
+
 # --- CONFIGURATION ---
+LATITUDE = 33.11 
+LONGITUDE = -117.08
 TASMOTA_URL = "http://tasmota-doorbell/cm?cmnd=" 
 LOG_DIR = "/mnt/sdcard/captures"
 ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
@@ -29,7 +34,7 @@ TARGET_CLASSES = {1: 'person', 17: 'cat', 18: 'dog', 21: 'bear'}
 # --- CAMERA DEFINITIONS ---
 # 1. Linksys (HTTP Snapshot Mode)
 CAM1_CONFIG = {
-    "name": "Linksys",
+    "name": "FrontDoor",
     "type": "http",
     "url": "http://192.168.0.112/img/snapshot.cgi",
     "motion_threshold": 800,
@@ -49,7 +54,7 @@ CAM1_CONFIG = {
 
 # 2. Tapo C120 (RTSP Stream 2 Mode)
 CAM2_CONFIG = {
-    "name": "Tapo",
+    "name": "Chickens",
     "type": "rtsp",
     "url": "rtsp://192.168.0.102:554/stream2",
     "motion_threshold": 1200, 
@@ -75,20 +80,58 @@ def tasmota_cmd(cmd):
     except:
         pass
 
-def is_time_active(start_str, end_str):
+def parse_time_str(time_str, sun_tracker):
     """
-    Checks if current time is within range (handles midnight crossing).
+    Converts a time string (e.g., '17:00', 'sunrise+01:30', 'sunset') 
+    into minutes-since-midnight.
+    """
+    if not time_str: return None
+    time_str = time_str.lower().replace(" ", "")
+    
+    base_mins = 0
+    offset_mins = 0
+    
+    # 1. Handle Solar Relative Times
+    if "sunrise" in time_str or "sunset" in time_str:
+        sun_tracker.update() # Ensure solar math is current for today
+        
+        if "sunrise" in time_str:
+            base_mins = sun_tracker.sunrise_mins
+        else:
+            base_mins = sun_tracker.sunset_mins
+            
+        # Parse the offset if it exists (+HH:MM or -HH:MM)
+        if "+" in time_str:
+            parts = time_str.split("+")[1].split(":")
+            offset_mins = int(parts[0]) * 60 + int(parts[1])
+        elif "-" in time_str:
+            parts = time_str.split("-")[1].split(":")
+            offset_mins = -(int(parts[0]) * 60 + int(parts[1]))
+
+    # 2. Handle Standard Absolute Times (e.g., "17:00")
+    else:
+        parts = time_str.split(":")
+        base_mins = int(parts[0]) * 60 + int(parts[1])
+        
+    # Wrap around the 24h clock (e.g., 23:00 + 2 hours = 01:00)
+    return (base_mins + offset_mins) % 1440
+
+def is_time_active(start_str, end_str, sun_tracker):
+    """
+    Checks if current time is within range, supporting solar offsets.
     """
     if not start_str or not end_str: return True
     
-    now = datetime.datetime.now().time()
-    start = datetime.datetime.strptime(start_str, "%H:%M").time()
-    end = datetime.datetime.strptime(end_str, "%H:%M").time()
+    now = datetime.datetime.now()
+    current_mins = now.hour * 60 + now.minute
     
-    if start <= end:
-        return start <= now <= end
+    start_mins = parse_time_str(start_str, sun_tracker)
+    end_mins = parse_time_str(end_str, sun_tracker)
+    
+    if start_mins <= end_mins:
+        return start_mins <= current_mins <= end_mins
     else: # Crosses midnight (e.g. 22:00 to 06:00)
-        return now >= start or now <= end
+        return current_mins >= start_mins or current_mins <= end_mins
 
 def check_motion_level(frame, avg_frame, alpha):
     """
@@ -296,6 +339,16 @@ with open(ALERT_FILE, "w") as f:
 last_save_time = 0
 last_bell_time = 0
 
+sun_tracker = DaylightMonitor(lat=LATITUDE, lon=LONGITUDE)
+test_str = "sunset+00:30"
+test_mins = parse_time_str(test_str, sun_tracker)
+test_time = sun_tracker.fmt(test_mins)
+
+print(f"Solar Tracker Online:")
+print(f" -> Today's Sunrise: {sun_tracker.sunrise}")
+print(f" -> Today's Sunset:  {sun_tracker.sunset}")
+print(f" -> Config Test '{test_str}' resolves to {test_time}")
+
 tasmota_cmd("Power1%20Blink")
 print(f"Sentry Armed with {len(active_cams)} cameras. Press Ctrl+C to stop.")
 
@@ -311,7 +364,7 @@ try:
 
         for config, cam_obj in active_cams:
             # CHECK SCHEDULE
-            is_active = is_time_active(config.get('start_time'), config.get('end_time'))
+            is_active = is_time_active(config.get('start_time'), config.get('end_time'), sun_tracker)
             
             # TELL CAMERA TO SLEEP/WAKE
             # This shuts down the background RTSP thread if inactive
