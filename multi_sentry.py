@@ -62,8 +62,8 @@ CAM2_CONFIG = {
     
     "alarm_class": ['motion'], # Just look for movement (e.g. at night)
     
-    "start_time": "17:00", # Only active at night
-    "end_time": "08:00",   # Crosses midnight correctly
+    "start_time": "sunset+00:30", # Only active at night
+    "end_time": "sunrise-00:30",   # Crosses midnight correctly
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
     # Set to None for full frame.
