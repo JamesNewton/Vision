@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import psutil
+import psutil #sudo apt install python3-psutil
 import shutil
 import argparse
 import sys
