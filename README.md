@@ -2,7 +2,8 @@
 Just some experiments with local vision (e.g. no cloud dependencies)
 
 ## Setup
-An Aaeon Boxer B with an extra many GB SDcard to provide additional storage. These little units are available for next to nothing today, used or "new old stock". They have:
+An Aaeon Boxer B (specifically a BOXER-8221AI-B1-1111) with an extra many GB SDcard to provide additional storage. 
+These little units are available for next to nothing today, used or "new old stock". They have:
 - 4 GB RAM, 2GB Swap (which removes most of the memory limits that plague stock Nanos)
 - 16 GB of internal eMMC (which is almost completely used with the stock OS install)
 - Quad core ARM A57 Processor
