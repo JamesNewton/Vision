@@ -9,6 +9,9 @@ These little units are available for next to nothing today, used or "new old sto
 - Quad core ARM A57 Processor
 - NVIDIA Jetson nano GPU, etc...
 
+The manual has been available at:
+https://data-us.aaeon.com/DOWNLOAD/MANUAL/BOXER-8521AI%20Manual%201st%20Ed.pdf
+
 Because there is so little space available on the internal drive, even installed software like docker needs to use the sdcard
 and it needs to automount. Make a perminant mount point:
 <br>`sudo mkdir -p /mnt/sdcard`
