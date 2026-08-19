@@ -1,6 +1,6 @@
 import jetson.inference
 import jetson.utils
-import cv2
+#import cv2 Move this after the jetson init in setup
 import numpy as np
 import requests
 '''
@@ -20,7 +20,7 @@ from sunrise_sunset import DaylightMonitor
 LATITUDE = 33.11 
 LONGITUDE = -117.08
 TASMOTA_URL = "http://tasmota-doorbell/cm?cmnd=" 
-LOG_DIR = "/mnt/sdcard/captures"
+LOG_DIR = "/mnt/ssd_data/captures"
 ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
 
 # SHARED SETTINGS
@@ -30,6 +30,9 @@ DOORBELL_SECONDS = 5.0
 POLL_INTERVAL = 0.2  # 5 Hz check rate
 
 TARGET_CLASSES = {1: 'person', 17: 'cat', 18: 'dog', 21: 'bear'}
+# Minimum size of a contiguous object (adjust this up or down!)
+# 500 pixels is roughly a small animal in a 1080p crop.
+MIN_OBJECT_AREA = 500 
 
 # --- CAMERA DEFINITIONS ---
 # 1. Linksys (HTTP Snapshot Mode)
@@ -56,14 +59,14 @@ CAM1_CONFIG = {
 CAM2_CONFIG = {
     "name": "Chickens",
     "type": "rtsp",
-    "url": "rtsp://192.168.0.102:554/stream2",
+    "url": "rtsp://username:password@192.168.1.102:554/stream2",
     "motion_threshold": 1200, 
     "alpha": 0.3,
     
     "alarm_class": ['motion'], # Just look for movement (e.g. at night)
     
-    "start_time": "sunset+00:30", # Only active at night
-    "end_time": "sunrise-00:30",   # Crosses midnight correctly
+    "start_time": "sunset-00:30", # Only active at night
+    "end_time": "sunrise+00:30",   # Crosses midnight correctly
     # Region of Interest (x, y, width, height)
     # Example: (100, 100, 300, 200) to ignore trees at edges.
     # Set to None for full frame.
@@ -130,13 +133,15 @@ def is_time_active(start_str, end_str, sun_tracker):
     
     if start_mins <= end_mins:
         return start_mins <= current_mins <= end_mins
-    else: # Crosses midnight (e.g. 22:00 to 06:00)
+    else: 
+        # Crosses midnight (e.g., sunset to sunrise)
         return current_mins >= start_mins or current_mins <= end_mins
 
 def check_motion_level(frame, avg_frame, alpha):
     """
-    Subroutine to check an area for motion.
-    Returns: pixel_count, updated_avg_frame
+    Advanced Motion Check:
+    Catches global illumination shifts (porch lights) via a high-sensitivity, 
+    high-volume threshold, while tracking hard objects via a strict threshold.
     """
     # Convert to grayscale and blur to remove noise
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -144,17 +149,39 @@ def check_motion_level(frame, avg_frame, alpha):
 
     # Initialize background on first frame
     if avg_frame is None:
+        return 0, gray.astype("float"), None
+
+    cv2.accumulateWeighted(gray, avg_frame, alpha)
+    frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(avg_frame))
+    
+    # We use a tiny threshold of '5' to catch the camera's auto-exposure ramp.
+    # Did more than 50% of the screen change by just a tiny bit?
+    light_thresh = cv2.threshold(frame_delta, 5, 255, cv2.THRESH_BINARY)[1]
+    total_pixels = frame_delta.shape[0] * frame_delta.shape[1]
+    
+    if np.count_nonzero(light_thresh) > (total_pixels * 0.50):
+        # This is a camera adjustment or a light turning on.
+        # Force the background to instantly adapt so we aren't blinded.
         avg_frame = gray.astype("float")
         return 0, avg_frame, None
 
-    # Update background
-    cv2.accumulateWeighted(gray, avg_frame, alpha)
-    
-    # Calculate difference
-    frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(avg_frame))
+    # Now we apply our strict threshold (25) to look for actual solid objects
     thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
     
-    return np.count_nonzero(thresh), avg_frame, thresh
+    # Catch all returned values to avoid OpenCV version crashes
+    cnts = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = cnts[0] if len(cnts) == 2 else cnts[1]
+    
+    clean_mask = np.zeros_like(thresh)
+    valid_motion_area = 0
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area > MIN_OBJECT_AREA:
+            cv2.drawContours(clean_mask, [c], -1, 255, -1)
+            valid_motion_area += area
+
+    return valid_motion_area, avg_frame, clean_mask
 
 def enhance_night_image(frame, avg_brightness):
     """
@@ -197,12 +224,12 @@ class HttpCamera:
 
     def read(self):
         try:
-            r = requests.get(self.url, timeout=0.5)
-            if r.status_code == 200:
-                arr = np.frombuffer(r.content, np.uint8)
-                frame = cv2.imdecode(arr, -1)
-                self.last_valid_frame = frame
-                return frame
+            with requests.get(self.url, timeout=0.5) as r:
+                if r.status_code == 200:
+                    arr = np.frombuffer(r.content, np.uint8)
+                    frame = cv2.imdecode(arr, -1)
+                    self.last_valid_frame = frame
+                    return frame
         except:
             pass
         return None
@@ -322,6 +349,7 @@ class RtspCamera:
 print("Initializing AI...")
 net = jetson.inference.detectNet("ssd-mobilenet-v2", threshold=CONFIDENCE_THRESHOLD)
 display = jetson.utils.videoOutput("display://0") 
+import cv2
 
 # Initialize Camera Objects based on config
 active_cams = []
@@ -342,7 +370,7 @@ last_bell_time = 0
 sun_tracker = DaylightMonitor(lat=LATITUDE, lon=LONGITUDE)
 test_str = "sunset+00:30"
 test_mins = parse_time_str(test_str, sun_tracker)
-test_time = sun_tracker.fmt(test_mins)
+test_time = sun_tracker.fmt(test_mins) # Using your built-in formatter!
 
 print(f"Solar Tracker Online:")
 print(f" -> Today's Sunrise: {sun_tracker.sunrise}")
@@ -473,7 +501,8 @@ try:
                                 
                                 col_conf = round(255 * d.Confidence)
                                 cv2.rectangle(proc_frame, (left, top), (right, bottom), (0, col_conf, 0), 2)
-                    
+                    del cuda_img
+                    del detections
                     # Update the display image list with this annotated frame
                     # (We replace the raw frame we added earlier)
                     display_images[-1] = proc_frame
@@ -539,6 +568,7 @@ try:
             cuda_display = jetson.utils.cudaFromNumpy(frame_rgba)
             display.Render(cuda_display)
             display.SetStatus(f"Sentry Mode | Cameras: {len(active_cams)}")
+            del cuda_display
 
 except KeyboardInterrupt:
     for _, c in active_cams:
