@@ -2,9 +2,10 @@ import serial
 import time
 import os
 from datetime import datetime
+from simple_mqtt import publish_mqtt_raw
 
 LOG_INTERVAL = 30 #seconds
-LOG_DIR = "/mnt/sdcard/captures"
+LOG_DIR = "/mnt/ssd_data/captures"
 ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
 
 # Setup Serial
@@ -48,8 +49,11 @@ try:
 
             with open(ALERT_FILE, "w") as f:
                 f.write(f"{now}, Radiation, CPM, {cpm}, \n")
-            
+
+            publish_mqtt_raw("sensors/radiation/cpm", str(cpm))
+
         time.sleep(LOG_INTERVAL) 
 except KeyboardInterrupt:
     ser.close()
     print("\nLogging stopped.")
+
