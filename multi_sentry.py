@@ -15,11 +15,11 @@ import threading
 
 # Local Libraries
 from sunrise_sunset import DaylightMonitor
+from simple_mqtt import publish_mqtt_raw
 
 # --- CONFIGURATION ---
 LATITUDE = 33.11 
 LONGITUDE = -117.08
-TASMOTA_URL = "http://tasmota-doorbell/cm?cmnd=" 
 LOG_DIR = "/mnt/ssd_data/captures"
 ALERT_FILE = os.path.join(LOG_DIR, "detection.csv")
 
@@ -77,9 +77,9 @@ CAMERAS = [CAM1_CONFIG, CAM2_CONFIG]
 
 # --- HELPER SUBROUTINES ---
 
-def tasmota_cmd(cmd):
+def pub_alert(topic, payload=""):
     try:
-        requests.get(f"{TASMOTA_URL}{cmd}", timeout=(None, 0.05))
+        publish_mqtt_raw("alert/"+topic, payload)
     except:
         pass
 
@@ -377,7 +377,7 @@ print(f" -> Today's Sunrise: {sun_tracker.sunrise}")
 print(f" -> Today's Sunset:  {sun_tracker.sunset}")
 print(f" -> Config Test '{test_str}' resolves to {test_time}")
 
-tasmota_cmd("Power1%20Blink")
+pub_alert("tts","Monitor active")
 print(f"Sentry Armed with {len(active_cams)} cameras. Press Ctrl+C to stop.")
 
 try:
@@ -534,11 +534,10 @@ try:
                     print(f"Alert [{config['name']}]: {t_class} {t_conf}%")
                     
                     if (current_time - last_bell_time > DOORBELL_SECONDS):
-                        # Simple rule: Persons ring bell, everything else blinks light
                         if t_class == 'person':
-                            tasmota_cmd("Power1%20Blink") 
+                            pub_alert(config['name']+"/person") 
                         else:
-                            tasmota_cmd("Power2%20Blink")
+                            pub_alert(config['name']+"/motion", t_class)
                         last_bell_time = current_time
                     
                     last_save_time = current_time
