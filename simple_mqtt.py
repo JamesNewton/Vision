@@ -1,6 +1,6 @@
 import socket
 
-def publish_mqtt_raw(topic, message, broker_ip="127.0.0.1", port=1883):
+def publish_mqtt_raw(topic, message="", broker_ip="127.0.0.1", port=1883):
     client_id = b"AaeonNode"
     topic_b = topic.encode('utf-8')
     msg_b = message.encode('utf-8')
