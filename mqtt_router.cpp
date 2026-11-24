@@ -283,6 +283,7 @@ void on_message(struct mosquitto* mosq, void* userdata, const struct mosquitto_m
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    std::cout << std::unitbuf;
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <rules.ini>\n";
         return 1;
