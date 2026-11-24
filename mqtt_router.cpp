@@ -1,3 +1,42 @@
+/*
+ * mqtt_router.cpp - Ultra lightweight MQTT topic router / rules engine.
+ *
+ * Operation:
+ *   Subscribes to incoming MQTT topics defined in an INI file, evaluates
+ *   payloads against per-rule conditions, and publishes outgoing messages.
+ *   Supports MQTT wildcards (+, #), per-rule cooldowns, edge-triggering
+ *   (fire only on false->true transition), payload range checks, and live 
+ *   config reload via SIGHUP.
+ *
+ * Build & Run:
+ *   g++ -std=c++17 -O2 -Wall -Wextra mqtt_router.cpp -lmosquitto -o mqtt_router
+ *   ./mqtt_router <rules.ini>
+ *   kill -HUP $(pidof mqtt_router)   # reload rules without restarting
+ *
+ * INI Format:
+ *   Lines starting with '#' or ';' are comments.
+ *
+ *   [broker]                         # Optional (defaults: localhost:1883)
+ *   host = <hostname>
+ *   port = <port>
+ *
+ *   [<rule_id>]                      # Any other section defines a rule
+ *   in_topic     = <mqtt_topic>      # Required; wildcards (+, #) supported
+ *   op           = <operator>        # Optional (default: any)
+ *                                    #   any           - always matches (even empty payload)
+ *                                    #   equals        - exact match against 'value'
+ *                                    #   contains      - substring match against 'value'
+ *                                    #   outside_range - numeric payload < min or > max
+ *                                    #   in_range      - numeric payload >= min and <= max
+ *                                    #   gt / lt       - numeric payload > max / < min
+ *   value        = <string>          # Used by equals, contains
+ *   min          = <number>          # Used by outside_range, in_range, lt
+ *   max          = <number>          # Used by outside_range, in_range, gt
+ *   cooldown     = <seconds>         # Optional; min seconds between fires (default: 0)
+ *   edge_trigger = true|false        # Optional; fire only on state change (default: false)
+ *   out          = <topic> | <payload>  # Repeatable; omit '| <payload>' for empty payload
+ */
+
 #include <mosquitto.h>
 
 #include <chrono>
